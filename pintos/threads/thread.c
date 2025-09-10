@@ -83,10 +83,17 @@ static uint64_t gdt[3] = { 0, 0x00af9a000000ffff, 0x00cf92000000ffff };
 
 /* 우선 순위 정렬을 위해 list_insert_ordered 3번째 인자에 들어갈 함수
     우선 순위 값을 비교해 큰 수가 앞에 오게 함 */
-static bool priority_order_func (const struct list_elem *a,
+bool priority_order_func (const struct list_elem *a,
                        const struct list_elem *b, void *aux) {
   const struct thread *ta = list_entry(a, struct thread, elem);
   const struct thread *tb = list_entry(b, struct thread, elem);
+  return ta->priority > tb->priority;
+}
+
+bool priority_donation_order_for (const struct list_elem *a,
+                       const struct list_elem *b, void *aux) {
+  const struct thread *ta = list_entry(a, struct thread, donation_elem);
+  const struct thread *tb = list_entry(b, struct thread, donation_elem);
   return ta->priority > tb->priority;
 }
 
@@ -97,6 +104,29 @@ static bool wake_order_func (const struct list_elem *a,
   const struct thread *ta = list_entry(a, struct thread, elem);
   const struct thread *tb = list_entry(b, struct thread, elem);
   return ta->wake_tick < tb->wake_tick;
+}
+
+static int max_waiter_priority_of_lock(const struct lock *l) {
+	int maxp = PRI_MIN;
+	struct list_elem *e;
+	for (e = list_begin(&l->semaphore.waiters); 
+			e != list_end(&l->semaphore.waiters); e = list_next(e)) {
+		struct thread *w = list_entry(e, struct thread, elem);
+		if (w->priority > maxp) maxp = w->priority;
+	}
+	return maxp;
+}
+
+static void recalc_effective_priority (struct thread *t) {
+	int newp = t->origin_priority;
+	struct list_elem *e;
+	for (e = list_begin(&t->held_locks); 
+			e != list_end(&t->held_locks); e = list_next(e)) {
+		struct lock *lk = list_entry(e, struct lock, elem);
+		int wp = max_waiter_priority_of_lock(lk);
+		if (wp > newp) newp = wp;
+	}
+	t->priority = newp;
 }
 
 /* Initializes the threading system by transforming the code
@@ -229,6 +259,10 @@ thread_create (const char *name, int priority,
 	/* Add to run queue. */
 	thread_unblock (t);
 
+	if (t->priority > thread_current()->priority) {
+		thread_yield();
+	}
+
 	return tid;
 }
 
@@ -356,7 +390,8 @@ void thread_sleep (int64_t ticks) {
 
 void wake_thread (void) {
 	while (!list_empty(&sleep_list)) { 
-		struct thread *head_thread = list_entry(list_front(&sleep_list), struct thread, elem);
+		struct thread *head_thread = list_entry(list_front(&sleep_list),
+													 struct thread, elem);
 		if (head_thread->wake_tick > timer_ticks()) break; // 아직 깰 때가 아닌 쓰레드면 탐색 종료
 		list_pop_front(&sleep_list); // 제거하고
 		thread_unblock(head_thread); // ready 리스트로
@@ -366,8 +401,17 @@ void wake_thread (void) {
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) {
-	thread_current ()->priority = new_priority;
-}
+	// thread_current ()->priority = new_priority;
+	struct thread *cur = thread_current();
+	cur->origin_priority = new_priority; // origin만 바꿈
+	recalc_effective_priority(cur); // priority 재계산
+	if (!list_empty(&ready_list)) {
+		struct thread *top = list_entry(list_front(&ready_list), struct thread, elem);
+		if (top->priority > cur->priority) {
+			thread_yield();
+		}
+	}
+} // set-priority
 
 /* Returns the current thread's priority. */
 int
@@ -464,6 +508,9 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
 	t->priority = priority;
 	t->magic = THREAD_MAGIC;
+	t->origin_priority = priority;
+	list_init(&t->held_locks);
+	t->waiting_on = NULL;
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should

@@ -96,8 +96,12 @@ struct thread {
 	struct list_elem elem;              /* List element. */
 
 	int64_t wake_tick;
-	// 락, 기부해준 쓰레드 리스트 (정렬), 
-	// 기부 받기 전 priority
+	struct list held_locks; // 보유 락 목록
+	struct lock *waiting_on; // 이 쓰레드가 기다리는 락
+	struct list donator; // 이 쓰레드에 기부해준 쓰레드 리스트
+	struct list_elem donation_elem; // 다른 쓰레드에 기부할 때 쓰는 elem
+
+	int origin_priority; // 태초 우선순위
 
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
@@ -117,7 +121,10 @@ struct thread {
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
-
+bool priority_order_func (const struct list_elem *,
+                       const struct list_elem *, void *);
+bool priority_donation_order_func (const struct list_elem *,
+                       const struct list_elem *, void *);
 void thread_init (void);
 void thread_start (void);
 
